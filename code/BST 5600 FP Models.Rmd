@@ -1,0 +1,177 @@
+---
+title: "BST 5600 FP Models"
+author: "Jiaying Liang"
+date: "5/14/2022"
+output: pdf_document
+---
+
+
+```{r}
+# set the hyper_priors
+hyper_priors <- list(prec.unstruct = list(prior = "loggamma", param = c(1, 0.01)),
+                     prec.spatial = list(prior = "loggamma", param = c(1, 0.01)))
+```
+
+
+```{r}
+# 13 formulas
+t1 = total_vaccine ~ death_rate +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+t2 = total_vaccine ~ n_death_rate +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+t3 = total_vaccine ~ case_rate +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+t4 = total_vaccine ~ death_rate + case_rate +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+t5 = total_vaccine ~ n_death_rate + case_rate +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+
+d1 = deaths ~ vaccine_rate +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+d2 = deaths ~ case_rate +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+d3 = deaths ~ vaccine_rate + case_rate +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+
+c1 = cases ~ vaccine_rate + 
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+c2 = cases ~ death_rate + 
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors) 
+c3 = cases ~ n_death_rate + 
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+c4 = cases ~ vaccine_rate + death_rate +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+c5 = cases ~ vaccine_rate + n_death_rate +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+```
+
+### total_vaccine
+```{r}
+mod1p <- inla(t1, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod1c <- inla(t1, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod1p)
+```
+
+```{r}
+summary(mod1c)
+```
+```{r}
+mod2p <- inla(t2, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod2c <- inla(t2, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod2p)
+```
+```{r}
+summary(mod2c)
+```
+
+```{r}
+mod3p <- inla(t3, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod3c <- inla(t3, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod3p)
+```
+```{r}
+summary(mod3c)
+```
+
+```{r}
+mod4p <- inla(t4, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod4c <- inla(t4, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod4p)
+```
+```{r}
+summary(mod4c)
+```
+
+```{r}
+mod5p <- inla(t5, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod5c <- inla(t5, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod5p)
+```
+```{r}
+summary(mod5c)
+```
+
+### deaths
+```{r}
+mod6p <- inla(d1, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod6c <- inla(d1, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod6p)
+```
+```{r}
+summary(mod6c)
+```
+```{r}
+mod7p <- inla(d2, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod7c <- inla(d2, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod7p)
+```
+
+
+```{r}
+summary(mod7c)
+```
+
+```{r}
+mod8p <- inla(d3, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod8c <- inla(d3, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod8p)
+```
+
+```{r}
+summary(mod8c)
+```
+
+### cases
+```{r}
+mod9p <- inla(c1, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod9c <- inla(c1, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod9p)
+```
+
+
+```{r}
+summary(mod9c)
+```
+
+
+```{r}
+mod10p <- inla(c2, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod10c <- inla(c2, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod10p)
+```
+
+```{r}
+summary(mod10c)
+```
+
+```{r}
+mod11p <- inla(c3, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod11c <- inla(c3, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod11p)
+```
+
+```{r}
+summary(mod11c)
+```
+
+```{r}
+mod12p <- inla(c4, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod12c <- inla(c4, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod12p)
+```
+
+```{r}
+summary(mod12c)
+```
+```{r}
+mod13p <- inla(c5, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+mod13c <- inla(c5, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod13p)
+```
+
+```{r}
+summary(mod13c)
+```
+
+
+

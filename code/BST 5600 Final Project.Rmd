@@ -1,0 +1,898 @@
+---
+title: "Final Project"
+author: "Jiaying Liang"
+date: "5/9/2022"
+output: pdf_document
+---
+```{r}
+# required library
+library(ggplot2)
+library(tidyverse)
+library(tidyselect)
+library(tidyr)
+library(dplyr)
+library(sf)
+library(sp)
+library(tmap)
+library(lubridate)
+library(stringr)
+library(tigris)
+library(spdep)
+library(ape)
+library(raster)
+library(INLA)
+```
+
+```{r}
+# Those data is from my data science capstone project, the github website is: 
+#   https://github.com/slu-openGIS/MO_HEALTH_Covid_Tracking/tree/master/data
+county_full <- read.csv("/Users/jiayingliang/Desktop/bst_fp_data/county_full.csv")
+county_full_vaccine <- read.csv("/Users/jiayingliang/Desktop/bst_fp_data/county_full_vaccination.csv")
+#daily_mo_1 <- st_read("/Users/jiayingliang/Desktop/bst_fp_data/daily_snapshot_mo.geojson")
+#daily_mo_2 <- st_read("/Users/jiayingliang/Desktop/bst_fp_data/daily_snapshot_mo_xl.geojson")
+#daily_mo_vaccine <- st_read("/Users/jiayingliang/Desktop/bst_fp_data/daily_snapshot_mo_vaccines.geojson")
+
+# the population data is from website: 
+#   https://www.missouri-demographics.com/counties_by_population
+county_pop <- read.csv("/Users/jiayingliang/Desktop/bst_fp_data/mo_county_population.csv")
+```
+
+### 1. Compute Moran's I for vaccination rate
+```{r}
+#################################################
+# Getting initiated and complete vaccination rate
+#################################################
+
+## 1. merge county_full_vaccine with county_pop
+
+### data processing: county_full_vaccine
+names(county_full_vaccine)[2] <- "County"
+
+### data processing: county_pop
+county_pop$County <- str_sub(county_pop$County, 1, nchar(county_pop$County)-7)
+county_pop <- county_pop[,-c(1)] # delete the Rank column
+county_pop$Population <- as.numeric(gsub(",", "",county_pop$Population))
+county_pop$County[4] <- "St. Louis City"
+
+county_full_vaccine <- merge(county_full_vaccine, county_pop, 
+                             by = "County")
+
+# 2. separate county_full_vaccine to different year
+county_full_vaccine$report_date <- ymd(county_full_vaccine$report_date)
+county_full_vaccine$year <- year(county_full_vaccine$report_date)
+
+ind_2020 <- which(county_full_vaccine$year == 2020)
+ind_2021 <- which(county_full_vaccine$year == 2021)
+ind_2022 <- which(county_full_vaccine$year == 2022)
+
+county_full_vaccine_2020 <- county_full_vaccine[ind_2020,]
+county_full_vaccine_2021 <- county_full_vaccine[ind_2021,]
+county_full_vaccine_2022 <- county_full_vaccine[ind_2022,]
+
+# 3. calculate vaccination rate: initiated and completed
+county_full_vaccine_2020 <- county_full_vaccine_2020 %>% 
+  filter(value == "initiated") %>% 
+  group_by(year, County, value, Population) %>% 
+  summarize(total_vaccine = sum(vaccinations)) %>% 
+  mutate(vaccine_rate = total_vaccine/Population)
+  
+county_full_vaccine_2021 <- county_full_vaccine_2021 %>% 
+  filter(value == "initiated") %>% 
+  group_by(year, County, value, Population) %>% 
+  summarize(total_vaccine = sum(vaccinations)) %>% 
+  mutate(vaccine_rate = total_vaccine/Population)
+
+county_full_vaccine_2022 <- county_full_vaccine_2022 %>% 
+  filter(value == "initiated") %>% 
+  group_by(year, County, value, Population) %>% 
+  summarize(total_vaccine = sum(vaccinations)) %>% 
+  mutate(vaccine_rate = total_vaccine/Population)
+```
+
+```{r}
+#######################################
+# add geometry to vaccination rate data
+#######################################
+
+## 1. get the geometry data from tigris library
+MO <- counties(29)# %>% select(c("County"="NAME", "GEOID", "geometry"))
+MO <- MO[, c("NAME", "GEOID", "geometry")]
+MO$GEOID <- as.numeric(MO$GEOID)
+names(MO)[1] <- "County"
+
+## 2. join vaccination rate data with geometry
+MO_vac_2020 = left_join(MO, county_full_vaccine_2020, by = "County")
+MO_vac_2021 = left_join(MO, county_full_vaccine_2021, by = "County")
+MO_vac_2022 = left_join(MO, county_full_vaccine_2022, by = "County")
+```
+```{r}
+###################################
+# Convert sf to sp, get nb, net, lw
+###################################
+
+# 1. convert sf to sp
+vac_2020_sp <- as(MO_vac_2020, "Spatial")
+vac_2021_sp <- as(MO_vac_2021, "Spatial")
+vac_2022_sp <- as(MO_vac_2022, "Spatial")
+
+# 2. get nb, net, lw
+vac_2020_nb <- poly2nb(vac_2020_sp, queen = FALSE)
+vac_2020_net <- nb2lines(vac_2020_nb, coords = coordinates(vac_2020_sp))
+vac_2020_lw <- nb2listw(vac_2020_nb)
+
+vac_2021_nb <- poly2nb(vac_2021_sp, queen = FALSE)
+vac_2021_net <- nb2lines(vac_2021_nb, coords = coordinates(vac_2021_sp))
+vac_2021_lw <- nb2listw(vac_2021_nb)
+
+vac_2022_nb <- poly2nb(vac_2022_sp, queen = FALSE)
+vac_2022_net <- nb2lines(vac_2022_nb, coords = coordinates(vac_2022_sp))
+vac_2022_lw <- nb2listw(vac_2022_nb)
+```
+
+```{r}
+########################################################################
+# Compute distance matrix, weight matrix, inverse distance weight matrix
+########################################################################
+
+## 2020
+dist_mat_2020 <- as.matrix(dist(coordinates(vac_2020_sp)))
+diag(dist_mat_2020) <- 1
+
+### the default weight matrix
+W_2020 <- 1/dist_mat_2020
+diag(W_2020) <- 0
+W_2020[is.infinite(W_2020)] <- 0
+
+### the inverse distance weight matrix
+WI_2020 <- W_2020/apply(W_2020, 1, sum)
+#WI_2020[is.na(WI_2020)] <- 0
+
+## 2021
+dist_mat_2021 <- as.matrix(dist(coordinates(vac_2021_sp)))
+diag(dist_mat_2021) <- 1
+
+### the default weight matrix
+W_2021 <- 1/dist_mat_2021
+diag(W_2021) <- 0
+W_2021[is.infinite(W_2021)] <- 0
+
+### the inverse distance weight matrix
+WI_2021 <- W_2021/apply(W_2021, 1, sum)
+#WI_2021[is.na(WI_2021)] <- 0
+
+## 2022
+dist_mat_2022 <- as.matrix(dist(coordinates(vac_2022_sp)))
+diag(dist_mat_2022) <- 1
+
+### the default weight matrix
+W_2022 <- 1/dist_mat_2022
+diag(W_2022) <- 0
+W_2022[is.infinite(W_2022)] <- 0
+
+### the inverse distance weight matrix
+WI_2022 <- W_2022/apply(W_2022, 1, sum)
+#WI_2022[is.na(WI_2022)] <- 0
+```
+
+
+```{r}
+#################################################
+# Compute Moran's I and
+#   test whether there is spatial autocorrelation
+#################################################
+
+# 1. 2020
+Moran.I(vac_2020_sp$vaccine_rate, WI_2020)
+#Moran.I(vac_2020_sp$vaccine_rate, listw2mat(vac_2020_lw))
+
+# 2. 2021
+Moran.I(vac_2021_sp$vaccine_rate, WI_2021)
+#Moran.I(vac_2021_sp$vaccine_rate, listw2mat(vac_2021_lw))
+
+# 3. 2022
+Moran.I(vac_2022_sp$vaccine_rate, WI_2022)
+#Moran.I(vac_2022_sp$vaccine_rate, listw2mat(vac_2022_lw))
+
+#############
+# Conclusion:
+#   By looking at Moran's I from inverse distance weight matrix 
+#     for 2020, 2021, and 2022:
+#   1. We got small p-values
+#   2. Small p-value means we reject the null hypothesis
+#      (Null hypothesis: the vaccination rate has no spatial autocorrelation)
+#   3. It means the vaccination rate has spatial autocorrelation.
+#############
+```
+
+```{r}
+#####################################
+# Choropleth map for vaccination rate
+#####################################
+
+# 1. 2020
+tm_shape(vac_2020_sp) +
+  tm_borders() +
+  tm_fill("vaccine_rate", palette = "Greens")
+
+# 2. 2021
+tm_shape(vac_2021_sp) +
+  tm_borders() +
+  tm_fill("vaccine_rate", palette = "Greens")
+
+# 3. 2022
+tm_shape(vac_2022_sp) +
+  tm_borders() +
+  tm_fill("vaccine_rate", palette = "Greens")
+```
+
+```{r}
+#county_full
+```
+### 2. Compute Moran's I for confirmed cases and death rate
+```{r}
+##############################################################
+# Getting the confirmed case data and death rate for each year
+##############################################################
+
+# *** lots of data set make Joplin and Kansas City be a county, so that is why there are 117 counties
+# I assume the data is not been added to their county, so I manually add it into it.
+
+# 1. data processing
+names(county_full)[3] <- "County"
+county_full$report_date <- ymd(county_full$report_date)
+county_full_data <- county_full %>% 
+  dplyr::select(report_date, County, state, cases, deaths) %>% 
+  filter(state == "Missouri")
+year_2020_ind <- which(year(county_full_data$report_date) == 2020 & month(county_full_data$report_date) == 12 & day(county_full_data$report_date) == 31)
+year_2021_ind <- which(year(county_full_data$report_date) == 2021 & month(county_full_data$report_date) == 12 & day(county_full_data$report_date) == 31)
+year_2022_ind <- which(year(county_full_data$report_date) == 2022 & month(county_full_data$report_date) == 3 & day(county_full_data$report_date) == 31)
+
+case_death_2020 <- county_full_data[year_2020_ind,]
+case_death_2021 <- county_full_data[year_2021_ind,]
+case_death_2022 <- county_full_data[year_2022_ind,]
+
+#which(county_full_data[year_2020_ind,]$County == "Joplin") # 52
+#which(county_full_data[year_2020_ind,]$County == "Jasper") # 49
+#which(county_full_data[year_2020_ind,]$County == "Kansas City") # 53
+#which(county_full_data[year_2020_ind,]$County == "Jackson") # 48
+
+jasper_cases_2020 <- case_death_2020[52,]$cases + case_death_2020[49,]$cases
+jasper_cases_2021 <- case_death_2021[52,]$cases + case_death_2021[49,]$cases
+jasper_cases_2022 <- case_death_2022[52,]$cases + case_death_2022[49,]$cases
+
+jasper_deaths_2020 <- case_death_2020[52,]$deaths + case_death_2020[49,]$deaths
+jasper_deaths_2021 <- case_death_2021[52,]$deaths + case_death_2021[49,]$deaths
+jasper_deaths_2022 <- case_death_2022[52,]$deaths + case_death_2022[49,]$deaths
+
+jackson_cases_2020 <- case_death_2020[53,]$cases + case_death_2020[48,]$cases
+jackson_cases_2021 <- case_death_2021[53,]$cases + case_death_2021[48,]$cases
+jackson_cases_2022 <- case_death_2022[53,]$cases + case_death_2022[48,]$cases
+
+jackson_deaths_2020 <- case_death_2020[53,]$deaths + case_death_2020[48,]$deaths
+jackson_deaths_2021 <- case_death_2021[53,]$deaths + case_death_2021[48,]$deaths
+jackson_deaths_2022 <- case_death_2022[53,]$deaths + case_death_2022[48,]$deaths
+
+case_death_2020[49,]$cases <- jasper_cases_2020
+case_death_2020[49,]$deaths <- jasper_deaths_2020
+case_death_2021[49,]$cases <- jasper_cases_2021
+case_death_2021[49,]$deaths <- jasper_deaths_2021
+case_death_2022[49,]$cases <- jasper_cases_2022
+case_death_2022[49,]$deaths <- jasper_deaths_2022
+
+case_death_2020[48,]$cases <- jackson_cases_2020
+case_death_2020[48,]$deaths <- jackson_deaths_2020
+case_death_2021[48,]$cases <- jackson_cases_2021
+case_death_2021[48,]$deaths <- jackson_deaths_2021
+case_death_2022[48,]$cases <- jackson_cases_2022
+case_death_2022[48,]$deaths <- jackson_deaths_2022
+
+case_death_2020 <- case_death_2020[-c(52,53),]
+case_death_2021 <- case_death_2021[-c(52,53),]
+case_death_2022 <- case_death_2022[-c(52,53),]
+
+case_2021 <- case_death_2021$cases - case_death_2020$cases
+death_2021 <- case_death_2021$deaths - case_death_2020$deaths
+case_2022 <- case_death_2022$cases - case_death_2021$cases
+death_2022 <- case_death_2022$deaths - case_death_2021$deaths
+
+case_death_2021$cases <- case_2021
+case_death_2021$deaths <- death_2021
+case_death_2022$cases <- case_2022
+case_death_2022$deaths <- death_2022
+
+# 2. add death rate to data
+case_deathr_2020 <- left_join(case_death_2020, county_pop, by = "County") %>% 
+  mutate(death_rate = deaths/Population, n_death_rate = deaths/cases, case_rate = cases/Population)
+case_deathr_2021 <- left_join(case_death_2021, county_pop, by = "County") %>% 
+  mutate(death_rate = deaths/Population, n_death_rate = deaths/cases, case_rate = cases/Population)
+case_deathr_2022 <- left_join(case_death_2022, county_pop, by = "County") %>% 
+  mutate(death_rate = deaths/Population, n_death_rate = deaths/cases, case_rate = cases/Population)
+```
+
+```{r}
+################################################
+# Add geometry to confirmed cases and death rate
+################################################
+
+# Join case, death_rate with geometry (cc: confirmed cases, dr: death rate)
+MO_cc_dr_2020 <- left_join(MO, case_deathr_2020, by = "County")
+
+MO_cc_dr_2021 <- left_join(MO, case_deathr_2021, by = "County")
+
+MO_cc_dr_2022 <- left_join(MO, case_deathr_2022, by = "County")
+```
+
+```{r}
+###################################
+# Convert sf to sp, get nb, net, lw
+###################################
+
+# 1. convert sf to sp
+cc_dr_2020_sp <- as(MO_cc_dr_2020, "Spatial")
+cc_dr_2021_sp <- as(MO_cc_dr_2021, "Spatial")
+cc_dr_2022_sp <- as(MO_cc_dr_2022, "Spatial")
+
+# 2. get nb, net, lw
+## 2020
+cc_dr_2020_nb <- poly2nb(cc_dr_2020_sp, queen = FALSE)
+cc_dr_2020_net <- nb2lines(cc_dr_2020_nb, coords = coordinates(cc_dr_2020_sp))
+cc_dr_2020_lw <- nb2listw(cc_dr_2020_nb)
+
+## 2021
+cc_dr_2021_nb <- poly2nb(cc_dr_2021_sp, queen = FALSE)
+cc_dr_2021_net <- nb2lines(cc_dr_2021_nb, coords = coordinates(cc_dr_2021_sp))
+cc_dr_2021_lw <- nb2listw(cc_dr_2021_nb)
+
+## 2022
+cc_dr_2022_nb <- poly2nb(cc_dr_2022_sp, queen = FALSE)
+cc_dr_2022_net <- nb2lines(cc_dr_2022_nb, coords = coordinates(cc_dr_2022_sp))
+cc_dr_2022_lw <- nb2listw(cc_dr_2022_nb)
+```
+
+```{r}
+########################################################################
+# Compute distance matrix, weight matrix, inverse distance weight matrix
+########################################################################
+
+## 2020
+cc_dr_dist_mat_2020 <- as.matrix(dist(coordinates(cc_dr_2020_sp)))
+diag(cc_dr_dist_mat_2020) <- 1
+
+### the default weight matrix
+cc_dr_W_2020 <- 1/cc_dr_dist_mat_2020
+diag(cc_dr_W_2020) <- 0
+#cc_W_2020[is.infinite(cc_W_2020)] <- 0
+
+### the inverse distance weight matrix
+cc_dr_WI_2020 <- cc_dr_W_2020/apply(cc_dr_W_2020, 1, sum)
+#WI_2020[is.na(WI_2020)] <- 0
+
+## 2021
+cc_dr_dist_mat_2021 <- as.matrix(dist(coordinates(cc_dr_2021_sp)))
+diag(cc_dr_dist_mat_2021) <- 1
+
+### the default weight matrix
+cc_dr_W_2021 <- 1/cc_dr_dist_mat_2021
+diag(cc_dr_W_2021) <- 0
+#cc_W_2020[is.infinite(cc_W_2020)] <- 0
+
+### the inverse distance weight matrix
+cc_dr_WI_2021 <- cc_dr_W_2021/apply(cc_dr_W_2021, 1, sum)
+#WI_2020[is.na(WI_2020)] <- 0
+
+## 2022
+cc_dr_dist_mat_2022 <- as.matrix(dist(coordinates(cc_dr_2022_sp)))
+diag(cc_dr_dist_mat_2022) <- 1
+
+### the default weight matrix
+cc_dr_W_2022 <- 1/cc_dr_dist_mat_2022
+diag(cc_dr_W_2022) <- 0
+#cc_W_2020[is.infinite(cc_W_2020)] <- 0
+
+### the inverse distance weight matrix
+cc_dr_WI_2022 <- cc_dr_W_2022/apply(cc_dr_W_2022, 1, sum)
+#WI_2020[is.na(WI_2020)] <- 0
+```
+
+```{r}
+#################################################
+# Compute Moran's I and
+#   test whether there is spatial autocorrelation
+#################################################
+
+# 1. 2020
+## cc
+Moran.I(cc_dr_2020_sp$cases, cc_dr_WI_2020)
+#Moran.I(cc_dr_2020_sp$cases, listw2mat(cc_dr_2020_lw))
+#############
+# Conclusion:
+#   By looking at Moran's I for ** Confirmed Cases **
+#     from inverse distance weight matrix for 2020:
+#   1. We got p-values = 0
+#   2. Small p-value means we reject the null hypothesis
+#      (Null hypothesis: the confirmed cases has no spatial autocorrelation)
+#   3. It means the year 2020's confirmed cases has spatial autocorrelation.
+#############
+
+## dr
+Moran.I(cc_dr_2020_sp$death_rate, cc_dr_WI_2020)
+#Moran.I(cc_dr_2020_sp$death_rate, listw2mat(cc_dr_2020_lw))
+#############
+# Conclusion:
+#   By looking at Moran's I for ** Death Rate **
+#     from inverse distance weight matrix for 2020:
+#   1. We got p-values = 0.098 > 0.05
+#   2. Large p-value means we cannot reject the null hypothesis
+#      (Null hypothesis: the death rate has no spatial autocorrelation)
+#   3. It means the year 2020's death rate has no spatial autocorrelation.
+#############
+
+## ndr
+Moran.I(cc_dr_2020_sp$n_death_rate, cc_dr_WI_2020)
+#############
+# Conclusion:
+#   By looking at Moran's I for ** New Death Rate **
+#     from inverse distance weight matrix for 2020:
+#   1. We got p-values = 0.0096
+#   2. Small p-value means we reject the null hypothesis
+#      (Null hypothesis: the new death rate has no spatial autocorrelation)
+#   3. It means the year 2020's new death rates has spatial autocorrelation.
+#############
+
+## cr 
+Moran.I(cc_dr_2020_sp$case_rate, cc_dr_WI_2020)
+#############
+# Conclusion:
+#   By looking at Moran's I for ** Confirmed Cases Rate **
+#     from inverse distance weight matrix for 2020:
+#   1. We got p-values = 0.000155
+#   2. Small p-value means we reject the null hypothesis
+#      (Null hypothesis: the confirmed cases rate has no spatial autocorrelation)
+#   3. It means the year 2020's confirmed cases rate has spatial autocorrelation.
+#############
+
+
+#########################################
+# Choropleth map for 2020 Confirmed Cases
+#   And Death Rate
+#########################################
+
+# 1. confirmed cases
+tm_shape(cc_dr_2020_sp) +
+  tm_borders() +
+  tm_fill("cases", palette = "Reds")
+
+# 2. death rate
+tm_shape(cc_dr_2020_sp) +
+  tm_borders() +
+  tm_fill("death_rate", palette = "Greys")
+
+# 3. new death rate
+tm_shape(cc_dr_2020_sp) +
+  tm_borders() +
+  tm_fill("n_death_rate", palette = "Greys")
+
+# 4. case rate
+tm_shape(cc_dr_2020_sp) +
+  tm_borders() +
+  tm_fill("case_rate", palette = "Reds")
+```
+
+```{r}
+# 2. 2021
+## cc
+Moran.I(cc_dr_2021_sp$cases, cc_dr_WI_2021)
+#Moran.I(cc_dr_2021_sp$cases, listw2mat(cc_dr_2021_lw))
+#############
+# Conclusion:
+#   By looking at Moran's I for ** Confirmed Cases **
+#     from inverse distance weight matrix for 2021:
+#   1. We got small p-value
+#   2. Small p-value means we reject the null hypothesis
+#      (Null hypothesis: the confirmed cases has no spatial autocorrelation)
+#   3. It means the year 2021's confirmed cases has spatial autocorrelation.
+#############
+
+
+## dr
+Moran.I(cc_dr_2021_sp$death_rate, cc_dr_WI_2021)
+#Moran.I(cc_dr_2021_sp$death_rate, listw2mat(cc_dr_2021_lw))
+#############
+# Conclusion:
+#   By looking at Moran's I for ** Death Rate **
+#     from inverse distance weight matrix for 2021:
+#   1. We got small p-value
+#   2. Small p-value means we reject the null hypothesis
+#      (Null hypothesis: the death rate has no spatial autocorrelation)
+#   3. It means the year 2021's death rate has spatial autocorrelation.
+#############
+
+## ndr
+Moran.I(cc_dr_2021_sp$n_death_rate, cc_dr_WI_2021)
+#############
+# Conclusion:
+#   By looking at Moran's I for ** New Death Rate **
+#     from inverse distance weight matrix for 2021:
+#   1. We got a small p-values
+#   2. Small p-value means we reject the null hypothesis
+#      (Null hypothesis: the new death rate has no spatial autocorrelation)
+#   3. It means the year 2021's new death rates has spatial autocorrelation.
+#############
+
+## cr
+Moran.I(cc_dr_2021_sp$case_rate, cc_dr_WI_2021)
+#############
+# Conclusion:
+#   By looking at Moran's I for ** Confirmed Cases Rate **
+#     from inverse distance weight matrix for 2021:
+#   1. We got small p-values
+#   2. Small p-value means we reject the null hypothesis
+#      (Null hypothesis: the confirmed cases rate has no spatial autocorrelation)
+#   3. It means the year 2021's confirmed cases rate has spatial autocorrelation.
+#############
+
+#########################################
+# Choropleth map for 2021 Confirmed Cases
+#   And Death Rate
+#########################################
+
+# 1. confirmed cases
+tm_shape(cc_dr_2021_sp) +
+  tm_borders() +
+  tm_fill("cases", palette = "Reds")
+
+# 2. death rate
+tm_shape(cc_dr_2021_sp) +
+  tm_borders() +
+  tm_fill("death_rate", palette = "Greys")
+
+# 3. death rate
+tm_shape(cc_dr_2021_sp) +
+  tm_borders() +
+  tm_fill("n_death_rate", palette = "Greys")
+
+# 4. death rate
+tm_shape(cc_dr_2021_sp) +
+  tm_borders() +
+  tm_fill("case_rate", palette = "Reds")
+```
+
+```{r}
+# 3. 2022
+## cc
+Moran.I(cc_dr_2022_sp$cases, cc_dr_WI_2022)
+#Moran.I(cc_dr_2022_sp$cases, listw2mat(cc_dr_2022_lw))
+#############
+# Conclusion:
+#   By looking at Moran's I for ** Confirmed Cases **
+#     from inverse distance weight matrix for 2022:
+#   1. We got small p-values
+#   2. Small p-value means we reject the null hypothesis
+#      (Null hypothesis: the confirmed cases has no spatial autocorrelation)
+#   3. It means the year 2022's confirmed cases has spatial autocorrelation.
+#############
+
+## dr
+Moran.I(cc_dr_2022_sp$death_rate, cc_dr_WI_2022)
+#Moran.I(cc_dr_2022_sp$death_rate, listw2mat(cc_dr_2022_lw))
+#############
+# Conclusion:
+#   By looking at Moran's I for ** Death Rate **
+#     from inverse distance weight matrix for 2022:
+#   1. We got p-values = 0.144 > 0.05
+#   2. Large p-value means we cannot reject the null hypothesis
+#      (Null hypothesis: the death rate has no spatial autocorrelation)
+#   3. It means the year 2022's death rate has no spatial autocorrelation.
+#############
+
+## ndr
+Moran.I(cc_dr_2022_sp$n_death_rate, cc_dr_WI_2022)
+#############
+# Conclusion:
+#   By looking at Moran's I for ** New Death Rate **
+#     from inverse distance weight matrix for 2022:
+#   1. We got p-values > 0.05
+#   2. Large p-value means we cannot reject the null hypothesis
+#      (Null hypothesis: the new death rate has no spatial autocorrelation)
+#   3. It means the year 2022's new death rates has no spatial autocorrelation.
+#############
+
+## cr
+Moran.I(cc_dr_2022_sp$case_rate, cc_dr_WI_2022)
+#############
+# Conclusion:
+#   By looking at Moran's I for ** Confirmed Cases Rate **
+#     from inverse distance weight matrix for 2022:
+#   1. We got large p-values
+#   2. Large p-value means we cannot reject the null hypothesis
+#      (Null hypothesis: the confirmed cases rate has no spatial autocorrelation)
+#   3. It means the year 2022's confirmed cases rate has no spatial autocorrelation.
+#############
+
+#########################################
+# Choropleth map for 2022 Confirmed Cases
+#   And Death Rate
+#########################################
+
+# 1. confirmed cases
+tm_shape(cc_dr_2022_sp) +
+  tm_borders() +
+  tm_fill("cases", palette = "Reds")
+
+# 2. death rate
+tm_shape(cc_dr_2022_sp) +
+  tm_borders() +
+  tm_fill("death_rate", palette = "Greys")
+
+# 3. death rate
+tm_shape(cc_dr_2022_sp) +
+  tm_borders() +
+  tm_fill("n_death_rate", palette = "Greys")
+
+# 4. death rate
+tm_shape(cc_dr_2022_sp) +
+  tm_borders() +
+  tm_fill("case_rate", palette = "Reds")
+```
+
+
+### 3. Spatial regression BYM Model:
+```{r}
+#########################################################
+# Use raster::union to merge two SpatialPolygonDataFrames
+#########################################################
+
+MO_2020_sp <- union(vac_2020_sp, cc_dr_2020_sp)
+MO_2021_sp <- union(vac_2021_sp, cc_dr_2021_sp)
+MO_2022_sp <- union(vac_2022_sp, cc_dr_2022_sp)
+
+# Clean up data for later use
+MO_2020_sp <- MO_2020_sp[, c("County.1", "GEOID.1", "Population.1", "total_vaccine", "vaccine_rate", "cases", "deaths", "death_rate", "n_death_rate", "case_rate")]
+MO_2021_sp <- MO_2021_sp[, c("County.1", "GEOID.1", "Population.1", "total_vaccine", "vaccine_rate", "cases", "deaths", "death_rate", "n_death_rate", "case_rate")]
+MO_2022_sp <- MO_2022_sp[, c("County.1", "GEOID.1", "Population.1", "total_vaccine", "vaccine_rate", "cases", "deaths", "death_rate", "n_death_rate", "case_rate")]
+
+# add idarea to each SPDF
+MO_2020_sp@data$idarea <- 1:nrow(MO_2020_sp)
+MO_2021_sp@data$idarea <- 1:nrow(MO_2021_sp)
+MO_2022_sp@data$idarea <- 1:nrow(MO_2022_sp)
+
+# make one map for later use
+mo_nb <- poly2nb(MO_2020_sp)
+nb2INLA("mo_map.adj", mo_nb)
+graph <- inla.read.graph(filename = "mo_map.adj")
+```
+
+```{r}
+# set the hyper_priors
+hyper_priors <- list(prec.unstruct = list(prior = "loggamma", param = c(1, 0.01)),
+                     prec.spatial = list(prior = "loggamma", param = c(1, 0.01)))
+```
+
+
+
+```{r}
+formula = deaths ~ vaccine_rate + 
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+
+mod_d_v <- inla(formula, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod_d_v)
+```
+
+
+```{r}
+formula = deaths ~ case_rate + vaccine_rate + 
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+
+mod_d_cr_vr <- inla(formula, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+summary(mod_d_cr_vr)
+```
+
+```{r}
+formula = cases ~ death_rate + vaccine_rate + 
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+
+mod_c_dr_vr <- inla(formula, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+summary(mod_c_dr_vr)
+```
+```{r}
+formula = cases ~ death_rate + vaccine_rate + 
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+
+mod_c_dr_cr1 <- inla(formula, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod_c_dr_cr1)
+```
+
+```{r}
+formula = total_vaccine ~ n_death_rate + case_rate + 
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+
+mod_v_ndr_cr1 <- inla(formula, family = "poisson", data = MO_2020_sp@data, offset = log(cases))
+summary(mod_v_ndr_cr1)
+```
+
+
+```{r}
+##############################################################################################
+# BYM Model:
+#
+# cases ~ POSSION(Population.1 exp(beta0 + beta1*vaccine_rate + beta2*death_rate + u_i + v_i))
+##############################################################################################
+
+formula = cases ~ vaccine_rate + death_rate +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+
+mod_2020 <- inla(formula, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+summary(mod_2020)
+
+# the Bayesian estimates
+MO_2020_sp@data$RR = mod_2020$summary.fitted.values[,"mean"]
+
+tm_shape( MO_2020_sp ) +
+  tm_borders() +
+  tm_polygons( col=c("cases", "RR") , 
+               breaks=seq(0,70000,5000) ) +
+  tm_layout( legend.show = FALSE , 
+             title=c("Cases","Posterior Mean") ,
+             title.position=c(0.10,0.10) )
+```
+
+```{r}
+MO_2020_sp$cases
+```
+```{r}
+MO_2020_sp$RR
+```
+
+```{r}
+#########################################################
+# Re-process the data to use real number not rate
+#########################################################
+
+MO_2020_sp <- union(vac_2020_sp, cc_dr_2020_sp)
+MO_2021_sp <- union(vac_2021_sp, cc_dr_2021_sp)
+MO_2022_sp <- union(vac_2022_sp, cc_dr_2022_sp)
+
+# Clean up data for later use
+MO_2020_sp <- MO_2020_sp[, c("County.1", "GEOID.1", "Population.1", "total_vaccine", "cases", "deaths")]
+MO_2021_sp <- MO_2021_sp[, c("County.1", "GEOID.1", "Population.1", "total_vaccine", "cases", "deaths")]
+MO_2022_sp <- MO_2022_sp[, c("County.1", "GEOID.1", "Population.1", "total_vaccine", "cases", "deaths")]
+
+# add idarea to each SPDF
+MO_2020_sp@data$idarea <- 1:nrow(MO_2020_sp)
+MO_2021_sp@data$idarea <- 1:nrow(MO_2021_sp)
+MO_2022_sp@data$idarea <- 1:nrow(MO_2022_sp)
+
+# make one map for later use
+mo_nb <- poly2nb(MO_2020_sp)
+nb2INLA("mo_map.adj", mo_nb)
+graph <- inla.read.graph(filename = "mo_map.adj")
+```
+
+```{r}
+###########################################################################################
+# BYM Model:
+#
+# deaths ~ POSSION(Population.1 exp(beta0 + beta1*total_vaccine + beta2*cases + u_i + v_i))
+###########################################################################################
+
+hyper_priors <- list(prec.unstruct = list(prior = "loggamma", param = c(1, 0.01)),
+                     prec.spatial = list(prior = "loggamma", param = c(1, 0.01)))
+
+formula = deaths ~ total_vaccine + cases +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+#formula = cases ~ total_vaccine + deaths +
+#  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+mod_2020_1 <- inla(formula, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+summary(mod_2020_1)
+
+# the Bayesian estimates
+MO_2020_sp@data$RR = mod_2020_1$summary.fitted.values[,"mean"]
+
+tm_shape( MO_2020_sp ) +
+  tm_borders() +
+  tm_polygons( col=c("deaths", "RR") , 
+               breaks=seq(0,1400,50) ) +
+  tm_layout( legend.show = FALSE , 
+             title=c("Raw Rate","Posterior Mean") ,
+             title.position=c(0.10,0.10) )
+```
+
+```{r}
+MO_2020_sp$deaths
+MO_2020_sp$RR
+```
+```{r}
+#########################################################################
+# BYM Model:
+#
+# total_vaccine ~ POSSION(Population.1 exp(beta0 + beta1*deaths + beta2*cases + u_i + v_i))
+#########################################################################
+
+hyper_priors <- list(prec.unstruct = list(prior = "loggamma", param = c(1, 0.01)),
+                     prec.spatial = list(prior = "loggamma", param = c(1, 0.01)))
+
+formula = total_vaccine ~ deaths + cases +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+mod_2020_1 <- inla(formula, family = "poisson", data = MO_2020_sp@data, offset = log(Population.1))
+summary(mod_2020_1)
+
+# the Bayesian estimates
+MO_2020_sp@data$RR = mod_2020_1$summary.fitted.values[,"mean"]
+
+tm_shape( MO_2020_sp ) +
+  tm_borders() +
+  tm_polygons( col=c("total_vaccine", "RR") , 
+               breaks=seq(0,18000,500) ) +
+  tm_layout( legend.show = FALSE , 
+             title=c("Raw Rate","Posterior Mean") ,
+             title.position=c(0.10,0.10) )
+```
+
+```{r}
+MO_2020_sp$total_vaccine
+MO_2020_sp$RR
+```
+```{r}
+# 2021
+
+#########################################################################
+# BYM Model:
+# ################ ??????????????????? change cases to case rate ????????????#################
+# ################# ???????????????? Change the titles for the graph ????????? ##############
+# ################ prediction has to be counts ################
+# deaths ~ POSSION(Population.1 exp(beta0 + beta1*total_vaccine + beta2*cases + u_i + v_i))
+#########################################################################
+
+hyper_priors <- list(prec.unstruct = list(prior = "loggamma", param = c(1, 0.01)),
+                     prec.spatial = list(prior = "loggamma", param = c(1, 0.01)))
+
+formula = deaths ~ total_vaccine + cases +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+mod_2021 <- inla(formula, family = "poisson", data = MO_2021_sp@data, offset = log(Population.1))
+summary(mod_2021)
+
+# the Bayesian estimates
+MO_2021_sp@data$RR = mod_2021$summary.fitted.values[,"mean"]
+
+MO_2021_sp$deaths
+MO_2021_sp$RR
+
+tm_shape( MO_2021_sp ) +
+  tm_borders() +
+  tm_polygons( col=c("deaths", "RR") , 
+               breaks=seq(0,1400,100) ) +
+  tm_layout( legend.show = FALSE , 
+             title=c("Raw Rate","Posterior Mean") ,
+             title.position=c(0.10,0.10) )
+```
+```{r}
+# 2022
+
+#########################################################################
+# BYM Model:
+#
+# deaths ~ POSSION(Population.1 exp(beta0 + beta1*total_vaccine + beta2*cases + u_i + v_i))
+#########################################################################
+
+hyper_priors <- list(prec.unstruct = list(prior = "loggamma", param = c(1, 0.01)),
+                     prec.spatial = list(prior = "loggamma", param = c(1, 0.01)))
+
+formula = deaths ~ total_vaccine + cases +
+  f(idarea, model = "bym", graph = graph, hyper = hyper_priors)
+mod_2022 <- inla(formula, family = "poisson", data = MO_2022_sp@data, offset = log(Population.1))
+summary(mod_2022)
+
+# the Bayesian estimates
+MO_2022_sp@data$RR = mod_2022$summary.fitted.values[,"mean"]
+
+MO_2022_sp$deaths
+MO_2022_sp$RR
+
+tm_shape( MO_2022_sp ) +
+  tm_borders() +
+  tm_polygons( col=c("deaths", "RR") , 
+               breaks=seq(0,600,50) ) +
+  tm_layout( legend.show = FALSE , 
+             title=c("Raw Rate","Posterior Mean") ,
+             title.position=c(0.10,0.10) )
+```
